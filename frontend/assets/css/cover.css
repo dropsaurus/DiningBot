@@ -28,6 +28,7 @@ html,
 body {
   height: 100%;
   background-color: #000;
+  overflow: hidden;
 }
 body {
   color: #fff;
@@ -55,16 +56,60 @@ body {
 
 /* Padding for spacing */
 .inner {
-  padding: 30px;
+  padding: 0 30px 30px 30px;
+}
+
+.cover-container > .inner:first-of-type {
+  padding-top: 20px;
+}
+
+.cover-container > .inner:has(.chat) {
+  padding-top: 80px;
 }
 
 
 /*
  * Header
  */
+.masthead {
+  text-align: center;
+  margin-bottom: 0;
+  position: relative;
+  z-index: 100;
+}
+
+.masthead .inner {
+  padding: 20px 30px;
+}
+
 .masthead-brand {
-  margin-top: 10px;
-  margin-bottom: 10px;
+  margin: 0;
+  padding: 10px 0;
+  font-family: 'Press Start 2P', cursive;
+  font-size: 22px;
+  color: #00ff00;
+  text-shadow: 0 0 10px #00ff00, 0 0 20px #00ff00;
+  letter-spacing: 2px;
+  line-height: 1.6;
+}
+
+.masthead-tagline {
+  margin: 0;
+  padding: 0;
+  font-family: 'Press Start 2P', cursive;
+  font-size: 9px;
+  color: #00d9ff;
+  text-shadow: 0 0 5px #00d9ff;
+  letter-spacing: 1px;
+  line-height: 1.6;
+}
+
+.footer-tagline {
+  text-align: center;
+  margin-top: 15px;
+  padding: 15px 30px 20px 30px;
+  position: relative;
+  z-index: 10;
 }
 
 .masthead-nav > li {
@@ -96,8 +141,11 @@ body {
 }
 
 @media (min-width: 768px) {
+  .masthead {
+    text-align: center;
+  }
   .masthead-brand {
-    float: left;
+    float: none;
   }
   .masthead-nav {
     float: right;

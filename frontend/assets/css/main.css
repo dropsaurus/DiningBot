@@ -3,9 +3,10 @@
 }
 
 .white {
-  background: #fff;
-  color: #000;
-  text-shadow: none;
+  background: #1a1a2e;
+  color: #00ff00;
+  text-shadow: 0 0 5px #00ff00;
+  font-family: 'Press Start 2P', cursive;
 }
 
 .white a {

@@ -1,0 +1,82 @@
+import json
+import boto3
+import os
+from datetime import datetime
+
+sqs = boto3.client('sqs')
+SQS_QUEUE_URL = os.environ.get('SQS_QUEUE_URL') 
+def lambda_handler(event, context):
+    try:
+        print(f"Event: {json.dumps(event)}")
+        intent_name = event['sessionState']['intent']['name']
+        
+        if intent_name == 'GreetingIntent':
+            return close(event, 'Fulfilled', "Hi there, how can I help?")
+        elif intent_name == 'ThankYouIntent':
+            return close(event, 'Fulfilled', "You're welcome!")
+        elif intent_name == 'DiningSuggestionsIntent':
+            return dining_suggestions_intent(event)
+        else:
+            return close(event, 'Failed', f"Intent {intent_name} not supported")
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return close(event, 'Failed', 'Sorry, error occurred.')
+
+def dining_suggestions_intent(event):
+    invocation_source = event['invocationSource']
+    slots = event['sessionState']['intent']['slots']
+    
+    if invocation_source == 'DialogCodeHook':
+        return delegate(event)
+    
+    if invocation_source == 'FulfillmentCodeHook':
+        location = get_slot(slots, 'City')
+        cuisine = get_slot(slots, 'Cuisine')
+        num_people = get_slot(slots, 'NumberOfPeople')
+        dining_date = get_slot(slots, 'DiningDate')
+        dining_time = get_slot(slots, 'DiningTime')
+        email = get_slot(slots, 'Email')
+        
+        print(f"Location={location}, Cuisine={cuisine}, People={num_people}, Date={dining_date}, Time={dining_time}, Email={email}")
+        
+        try:
+            msg = {
+                'location': location,
+                'cuisine': cuisine,
+                'num_people': num_people,
+                'dining_date': dining_date,
+                'dining_time': dining_time,
+                'email': email,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            sqs.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=json.dumps(msg))
+            return close(event, 'Fulfilled', "You're all set. Expect my suggestions shortly!")
+        except Exception as e:
+            print(f"SQS Error: {str(e)}")
+            return close(event, 'Failed', 'Error occurred.')
+
+def get_slot(slots, name):
+    if slots.get(name) and slots[name].get('value'):
+        return slots[name]['value']['interpretedValue']
+    return None
+
+def delegate(event):
+    return {
+        'sessionState': {
+            'dialogAction': {'type': 'Delegate'},
+            'intent': event['sessionState']['intent']
+        }
+    }
+
+def close(event, state, message):
+    return {
+        'sessionState': {
+            'dialogAction': {'type': 'Close'},
+            'intent': {
+                'name': event['sessionState']['intent']['name'],
+                'state': state
+            }
+        },
+        'messages': [{'contentType': 'PlainText', 'content': message}]
+    }

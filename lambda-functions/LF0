@@ -1,0 +1,74 @@
+import json
+import boto3
+
+# Initialize Lex client
+lex_client = boto3.client('lexv2-runtime')
+
+
+BOT_ID = os.environ.get('BOT_ID')
+BOT_ALIAS_ID = os.environ.get('BOT_ALIAS_ID')
+LOCALE_ID = os.environ.get('LOCALE_ID', 'en_US')
+
+def lambda_handler(event, context):
+    """
+    LF0 - API Gateway Lambda that forwards messages to Lex
+    """
+    try:
+        print(f"LF0 received event: {json.dumps(event)}")
+        
+        # Extract message from API Gateway request
+        body = json.loads(event.get('body', '{}'))
+        user_message = body.get('messages', [{}])[0].get('unstructured', {}).get('text', '')
+        
+        if not user_message:
+            return create_response(400, 'Please provide a message')
+        
+        # UPDATED: Get session ID from frontend, or use requestId as fallback
+        session_id = body.get('sessionId', event.get('requestContext', {}).get('requestId', 'default-session'))
+        
+        print(f"User message: {user_message}")
+        print(f"Session ID: {session_id}")  # Debug log
+        
+        # Call Lex bot
+        lex_response = lex_client.recognize_text(
+            botId=BOT_ID,
+            botAliasId=BOT_ALIAS_ID,
+            localeId=LOCALE_ID,
+            sessionId=session_id,  # Use consistent session ID
+            text=user_message
+        )
+        
+        print(f"Lex response: {json.dumps(lex_response, default=str)}")
+        
+        # Extract response message from Lex
+        bot_message = ''
+        if lex_response.get('messages'):
+            bot_message = lex_response['messages'][0].get('content', '')
+        
+        return create_response(200, bot_message)
+        
+    except Exception as e:
+        print(f"Error in LF0: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return create_response(500, 'I am still under development. Please come back later.')
+
+def create_response(status_code, message):
+    """Helper function to create API Gateway response"""
+    return {
+        'statusCode': status_code,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+            'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+        },
+        'body': json.dumps({
+            'messages': [{
+                'type': 'unstructured',
+                'unstructured': {
+                    'text': message
+                }
+            }]
+        })
+    }

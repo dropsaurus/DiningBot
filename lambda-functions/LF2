@@ -1,0 +1,192 @@
+import boto3
+import json
+import random
+import os
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
+
+sqs = boto3.client('sqs')
+dynamodb = boto3.resource('dynamodb')
+ses = boto3.client('ses', region_name='us-east-1')
+
+QUEUE_URL = os.environ.get('QUEUE_URL')
+TABLE_NAME = os.environ.get('TABLE_NAME')
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL')
+ES_HOST = os.environ.get('ES_HOST')
+ES_REGION = os.environ.get('ES_REGION', 'us-east-1')  # Default to us-east-1
+ES_INDEX = os.environ.get('ES_INDEX', 'restaurants')  # Default to restaurants
+
+def get_opensearch_client():
+    credentials = boto3.Session().get_credentials()
+    awsauth = AWS4Auth(
+        credentials.access_key,
+        credentials.secret_key,
+        ES_REGION,
+        'es',
+        session_token=credentials.token
+    )
+    
+    client = OpenSearch(
+        hosts=[{'host': ES_HOST, 'port': 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection
+    )
+    return client
+
+def query_opensearch(cuisine):
+    try:
+        es_client = get_opensearch_client()
+        query = {
+            "query": {
+                "match": {
+                    "Cuisine": cuisine.lower()
+                }
+            },
+            "size": 500
+        }
+        
+        response = es_client.search(index=ES_INDEX, body=query)
+        
+        restaurant_ids = []
+        for hit in response['hits']['hits']:
+            source = hit['_source']
+            restaurant_id = source.get('RestaurantID') or source.get('BusinessID')
+            if restaurant_id:
+                restaurant_ids.append(restaurant_id)
+        
+        print(f"Found {len(restaurant_ids)} restaurants for {cuisine}")
+        return restaurant_ids
+    except Exception as e:
+        print(f"Error querying OpenSearch: {str(e)}")
+        return []
+
+def get_restaurant_details(restaurant_ids):
+    table = dynamodb.Table(TABLE_NAME)
+    restaurants = []
+    
+    for rest_id in restaurant_ids:
+        try:
+            response = table.get_item(Key={'BusinessID': rest_id})
+            if 'Item' in response:
+                restaurants.append(response['Item'])
+        except Exception as e:
+            print(f"Error fetching {rest_id}: {str(e)}")
+    
+    print(f"Retrieved {len(restaurants)} restaurant details")
+    return restaurants
+
+def format_email(restaurants, cuisine, num_people, dining_date, dining_time):
+    email_text = f"Hello! Here are my {cuisine.capitalize()} restaurant suggestions "
+    email_text += f"for {num_people} people, for {dining_date} at {dining_time}:\n\n"
+    
+    for idx, restaurant in enumerate(restaurants, 1):
+        name = restaurant.get('Name', 'Unknown')
+        address = restaurant.get('Address', 'Address not available')
+        email_text += f"{idx}. {name}, located at {address}\n"
+    
+    email_text += "\nEnjoy your meal!"
+    return email_text
+
+def lambda_handler(event, context):
+    response = sqs.receive_message(
+        QueueUrl=QUEUE_URL,
+        MaxNumberOfMessages=1,
+        WaitTimeSeconds=0
+    )
+    
+    if 'Messages' not in response:
+        print("No messages in queue")
+        return {'statusCode': 200, 'body': json.dumps('No messages')}
+    
+    message = response['Messages'][0]
+    receipt_handle = message['ReceiptHandle']
+    
+    # Get request ID for logging
+    request_id = context.aws_request_id  # ✅ FIXED
+    
+    try:
+        message_body = json.loads(message['Body'])
+        cuisine = message_body.get('cuisine', '').strip()
+        dining_date = message_body.get('dining_date', '')
+        dining_time = message_body.get('dining_time', '')
+        num_people = message_body.get('num_people', '')
+        user_email = message_body.get('email', '')
+        
+        print(f"[RequestId: {request_id}] Processing: Cuisine={cuisine}, Email={user_email}")
+        
+        if not cuisine or not user_email:
+            raise ValueError("Missing cuisine or email")
+        
+        restaurant_ids = query_opensearch(cuisine)
+        
+        if not restaurant_ids:
+            # No restaurants found - still try to send email
+            try:
+                ses.send_email(
+                    Source=SENDER_EMAIL,
+                    Destination={'ToAddresses': [user_email]},
+                    Message={
+                        'Subject': {'Data': f'{cuisine.capitalize()} Restaurant Suggestions'},
+                        'Body': {'Text': {'Data': f"Sorry, no {cuisine} restaurants found."}}
+                    }
+                )
+                # Email sent successfully - delete message
+                sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt_handle)
+                print(f"[RequestId: {request_id}] Successfully sent 'no restaurants' email")
+                return {'statusCode': 200, 'body': json.dumps('No restaurants email sent')}
+            except Exception as email_error:
+                # Email failed - DON'T delete, let it retry
+                print(f"[RequestId: {request_id}] ERROR: Failed to send email")
+                print(f"[RequestId: {request_id}] Error reason: {str(email_error)}")
+                # Don't delete - message will be retried or go to DLQ
+                raise
+        else:
+            selected_ids = random.sample(restaurant_ids, min(3, len(restaurant_ids)))
+            restaurants = get_restaurant_details(selected_ids)
+            
+            if not restaurants:
+                raise Exception("Could not retrieve restaurant details")
+            
+            email_body = format_email(
+                restaurants,
+                cuisine,
+                num_people,
+                dining_date,
+                dining_time
+            )
+            
+            print(f"[RequestId: {request_id}] Attempting to send email to {user_email}")
+            
+            try:
+                # Try to send email
+                ses.send_email(
+                    Source=SENDER_EMAIL,
+                    Destination={'ToAddresses': [user_email]},
+                    Message={
+                        'Subject': {'Data': f'{cuisine.capitalize()} Restaurant Suggestions'},
+                        'Body': {'Text': {'Data': email_body}}
+                    }
+                )
+                
+                # Email sent successfully - NOW delete the message
+                sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=receipt_handle)
+                print(f"[RequestId: {request_id}] Successfully sent suggestions and deleted message")
+                
+                return {'statusCode': 200, 'body': json.dumps('Success')}
+                
+            except Exception as email_error:
+                # SES failed - DON'T delete message, log error
+                print(f"[RequestId: {request_id}] ERROR: SES send failed")
+                print(f"[RequestId: {request_id}] Error reason: {str(email_error)}")
+                print(f"[RequestId: {request_id}] Error type: {type(email_error).__name__}")
+                # Re-raise to trigger retry/DLQ
+                raise
+        
+    except Exception as e:
+        print(f"[RequestId: {request_id}] Error processing message: {str(e)}")
+        import traceback
+        print(f"[RequestId: {request_id}] Traceback: {traceback.format_exc()}")
+        # Don't delete - let SQS retry or move to DLQ
+        return {'statusCode': 500, 'body': json.dumps(f'Error: {str(e)}')}
